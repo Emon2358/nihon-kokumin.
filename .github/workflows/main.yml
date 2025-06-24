@@ -1,4 +1,4 @@
-name: Download & Benchmark MP3
+name: Download & Benchmark All Files
 
 on:
   workflow_dispatch:
@@ -28,51 +28,47 @@ jobs:
         id: prep
         run: |
           START=$(date +%s)
-          # トレントファイルを取得
           curl -L -o album.torrent https://nyaa.si/download/655498.torrent
 
-          # transmission-show で Name: 行を抜き出し
           NAME=$(transmission-show album.torrent \
             | sed -n 's/^[[:space:]]*Name:[[:space:]]*//p')
-          echo "Extracted name: $NAME"
-
-          # albums/<name> ディレクトリ作成
           mkdir -p albums/"$NAME"
-
           END=$(date +%s)
-          echo "prep_time=$((END-START))" >> $GITHUB_OUTPUT
-          echo "name=$NAME" >> $GITHUB_OUTPUT
 
-      ## 4. MP3ファイルのインデックスを取得して並列ダウンロード（所要時間計測）
-      - name: Parallel MP3 download
+          # prep_time 出力（マルチライン形式）
+          echo "prep_time<<EOF" >> $GITHUB_OUTPUT
+          echo "$((END-START))"          >> $GITHUB_OUTPUT
+          echo "EOF"                     >> $GITHUB_OUTPUT
+
+          # name 出力（マルチライン形式）
+          echo "name<<EOF" >> $GITHUB_OUTPUT
+          echo "$NAME"      >> $GITHUB_OUTPUT
+          echo "EOF"        >> $GITHUB_OUTPUT
+
+      ## 4. トレント内の全ファイルを並列ダウンロード（所要時間計測）
+      - name: Parallel All Files download
         id: dl
         run: |
           START=$(date +%s)
 
-          # 各ファイルの一覧を取得し、拡張子 .mp3 の行だけインデックス番号を抜き出し
-          IDX_LIST=($(transmission-show -l album.torrent \
-            | awk '/\.mp3$/ {print $1}'))
-
-          # 並列ダウンロード
-          for idx in "${IDX_LIST[@]}"; do
-            aria2c \
-              --dir=albums/"${{ steps.prep.outputs.name }}" \
-              --select-file="$idx" \
-              --max-connection-per-server=4 \
-              --split=4 \
-              --min-split-size=1M \
-              --continue=true \
-              --retry-wait=2 \
-              --max-tries=5 \
-              https://nyaa.si/download/655498.torrent \
-            &
-          done
-          wait
+          # トレント内の全ファイルを、一度に aria2c で取得
+          aria2c \
+            --dir=albums/"${{ steps.prep.outputs.name }}" \
+            --max-connection-per-server=8 \
+            --split=8 \
+            --min-split-size=1M \
+            --continue=true \
+            --retry-wait=2 \
+            --max-tries=5 \
+            https://nyaa.si/download/655498.torrent
 
           END=$(date +%s)
-          echo "download_time=$((END-START))" >> $GITHUB_OUTPUT
+          # download_time 出力
+          echo "download_time<<EOF" >> $GITHUB_OUTPUT
+          echo "$((END-START))"           >> $GITHUB_OUTPUT
+          echo "EOF"                      >> $GITHUB_OUTPUT
 
-      ## 5. コミット＆プッシュ（変更がなければスキップ／所要時間計測）
+      ## 5. コミット＆プッシュ（変更なければスキップ／所要時間計測）
       - name: Commit and Push
         id: push
         run: |
@@ -81,14 +77,17 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
 
           git add albums/"${{ steps.prep.outputs.name }}"
-          # 変更なければ「No changes to commit」で終了
-          git commit -m "Add MP3: ${{ steps.prep.outputs.name }}" || echo "No changes to commit"
-          git push || echo "Push failed (check write permissions)"
+          git commit -m "Add all files: ${{ steps.prep.outputs.name }}" \
+            || echo "No changes to commit"
+          git push || echo "Push failed"
 
           END=$(date +%s)
-          echo "push_time=$((END-START))" >> $GITHUB_OUTPUT
+          # push_time 出力
+          echo "push_time<<EOF" >> $GITHUB_OUTPUT
+          echo "$((END-START))"    >> $GITHUB_OUTPUT
+          echo "EOF"               >> $GITHUB_OUTPUT
 
-      ## 6. ベンチ結果をまとめて表示
+      ## 6. ベンチ結果まとめ表示
       - name: Show benchmark results
         run: |
           echo "===== Benchmark Results ====="
