@@ -1,0 +1,102 @@
+name: Download & Benchmark MP3
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      # ─── キャッシュ ────────────────────────────────────────────────
+      - name: Cache apt packages
+        uses: actions/cache@v3
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-packages
+
+      - name: Cache npm modules
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+
+      # ─── ツールインストール ───────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq aria2 git
+          npm install -g webtorrent-cli
+        # ≫ このステップの所要時間を time で計測
+        
+
+      # ─── メタデータ取得 & フォルダ作成 ──────────────────────────────
+      - name: Extract album name & mkdir
+        id: prep
+        run: |
+          START=$(date +%s)
+          # torrent をメタデータのみ取得
+          curl -L -o album.torrent https://nyaa.si/download/655498.torrent
+          META=$(webtorrent info album.torrent --json)
+          NAME=$(echo "$META" | jq -r '.name')
+          mkdir -p albums/"$NAME"
+          END=$(date +%s)
+          echo "prep_time=$((END-START))" >> $GITHUB_OUTPUT
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+
+
+      # ─── MP3 ダウンロード（並列化＋マルチコネクション） ───────────────
+      - name: Parallel MP3 download
+        run: |
+          START=$(date +%s)
+          META=$(webtorrent info album.torrent --json)
+          # .mp3ファイルのインデックス一覧を作成
+          IDX_LIST=($(echo "$META" | jq -r '.files | to_entries[] | select(.value.path|endswith(".mp3")) | .key'))
+          # GNU parallel がない環境を想定し、バックグラウンド & wait で並列化
+          for idx in "${IDX_LIST[@]}"; do
+            aria2c \
+              --dir=albums/"${{ steps.prep.outputs.name }}" \
+              --select-file=$idx \
+              --max-connection-per-server=4 \
+              --split=4 \
+              --min-split-size=1M \
+              --continue=true \
+              --retry-wait=2 \
+              --max-tries=5 \
+              --quiet=true \
+              https://nyaa.si/download/655498.torrent \
+            & 
+          done
+          wait
+          END=$(date +%s)
+          echo "download_time=$((END-START))" >> $GITHUB_OUTPUT
+
+
+      # ─── コミット＆プッシュ ─────────────────────────────────────────
+      - name: Commit and Push
+        run: |
+          START=$(date +%s)
+          git config user.name "github-actions[bot]"
+          git config user.email "bot@users.noreply.github.com"
+          git add albums/"${{ steps.prep.outputs.name }}"
+          git commit -m "Add MP3: ${{ steps.prep.outputs.name }}"
+          git push
+          END=$(date +%s)
+          echo "push_time=$((END-START))" >> $GITHUB_OUTPUT
+
+      # ─── ベンチ結果をまとめて表示 ───────────────────────────────────
+      - name: Show benchmark results
+        run: |
+          echo "===== Benchmark Results ====="
+          echo "Prepare (torrent＋mkdir) : ${{ steps.prep.outputs.prep_time }} sec"
+          echo "Download (parallel)     : ${{ steps.prep.outputs.download_time }} sec"
+          echo "Commit & Push           : ${{ steps.prep.outputs.push_time }} sec"
